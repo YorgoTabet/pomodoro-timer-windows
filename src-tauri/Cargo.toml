@@ -1,8 +1,8 @@
 [package]
 name = "pomodoro-timer-windows"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Pomodoro timer for Windows"
+authors = ["Yorgo Tabet"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

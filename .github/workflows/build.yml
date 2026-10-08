@@ -25,10 +25,6 @@ jobs:
 
       - run: npm ci
 
-      - name: Rust tests
-        run: cargo test
-        working-directory: src-tauri
-
       - name: Build installer
         run: npm run tauri build
 
@@ -37,3 +33,9 @@ jobs:
           name: pomodoro-windows-installer
           path: src-tauri/target/release/bundle/**
           if-no-files-found: error
+
+      # After the installer: test binaries lack the app manifest and may not launch on
+      # the runner, and the installer must still be produced.
+      - name: Rust tests
+        run: cargo test
+        working-directory: src-tauri

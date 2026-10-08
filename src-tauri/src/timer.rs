@@ -214,8 +214,10 @@ impl Shared {
     /// Returns the clamped settings that were kept.
     pub fn replace_settings(&self, settings: Settings) -> std::io::Result<Settings> {
         let clamped = settings.clamped();
+        // Saved under the lock so it cannot interleave with a bar drag's save.
+        let mut guard = lock(&self.settings);
         clamped.save(&self.settings_path)?;
-        *lock(&self.settings) = clamped.clone();
+        *guard = clamped.clone();
         Ok(clamped)
     }
 }
@@ -262,13 +264,16 @@ pub fn apply(app: &AppHandle, change: impl FnOnce(&mut TimerCore, &Settings, Sys
 /// window behave the same.
 pub fn commit_settings(app: &AppHandle, settings: Settings) -> Result<Settings, String> {
     let shared = app.state::<Shared>();
+    let bar_was_shown = shared.settings().show_floating_bar;
     let saved = shared.replace_settings(settings).map_err(|e| e.to_string())?;
     let _ = app.emit("settings-changed", &saved);
     apply(app, |c, s, _| {
         c.settings_changed(s);
         None
     });
-    crate::tray::sync_bar(app, &saved);
+    if saved.show_floating_bar != bar_was_shown {
+        crate::tray::sync_bar(app, &saved);
+    }
     Ok(saved)
 }
 

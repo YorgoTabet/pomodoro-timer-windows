@@ -1,4 +1,4 @@
-use crate::timer::Shared;
+use crate::timer::{commit_settings, Shared};
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -104,6 +104,17 @@ pub fn create(app: &AppHandle, title: &str) {
     let app = app.clone();
     let generation = Arc::new(AtomicU64::new(0));
     window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            // Alt+F4 means "hide the bar", so the setting and the menu label follow.
+            api.prevent_close();
+            let app = app.clone();
+            thread::spawn(move || {
+                let mut settings = app.state::<Shared>().settings();
+                settings.show_floating_bar = false;
+                let _ = commit_settings(&app, settings);
+            });
+            return;
+        }
         let WindowEvent::Moved(PhysicalPosition { x, y }) = *event else { return };
         let (x, y) = (f64::from(x), f64::from(y));
         // Placing the window at launch is a move too, and is not a drag.

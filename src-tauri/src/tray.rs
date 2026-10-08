@@ -49,7 +49,7 @@ pub fn build(app: &AppHandle, state: &TimerState, show_bar: bool) -> tauri::Resu
     let reset = MenuItem::with_id(app, "reset", "Reset", true, None::<&str>)?;
     let bar = MenuItem::with_id(app, "bar", bar_label(show_bar), true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-    let stats = MenuItem::with_id(app, "stats", "Stats…", true, None::<&str>)?;
+    let stats = MenuItem::with_id(app, "stats", "Statistics…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Pomodoro", true, None::<&str>)?;
     let sep = || PredefinedMenuItem::separator(app);
 
@@ -81,8 +81,8 @@ pub fn build(app: &AppHandle, state: &TimerState, show_bar: bool) -> tauri::Resu
                     settings.show_floating_bar = !settings.show_floating_bar;
                     let _ = timer::commit_settings(&app, settings);
                 }
-                "settings" => open_window(&app, "settings", "Settings"),
-                "stats" => open_window(&app, "stats", "Stats"),
+                "settings" => open_window(&app, "settings", "Pomodoro Settings"),
+                "stats" => open_window(&app, "stats", "Statistics"),
                 "quit" => app.exit(0),
                 _ => {}
             });
@@ -122,9 +122,9 @@ pub fn refresh(app: &AppHandle, state: &TimerState) {
 
 fn bar_label(show: bool) -> &'static str {
     if show {
-        "Hide floating bar"
+        "Hide Floating Bar"
     } else {
-        "Show floating bar"
+        "Show Floating Bar"
     }
 }
 
@@ -193,8 +193,8 @@ mod tests {
 
     #[test]
     fn bar_label_follows_the_setting() {
-        assert_eq!(bar_label(true), "Hide floating bar");
-        assert_eq!(bar_label(false), "Show floating bar");
+        assert_eq!(bar_label(true), "Hide Floating Bar");
+        assert_eq!(bar_label(false), "Show Floating Bar");
     }
 
     #[test]
