@@ -149,15 +149,22 @@ fn toggle_label(is_running: bool) -> &'static str {
     }
 }
 
-/// Focus the window if it is open, otherwise create it. The page at `/{label}` is
-/// built in a later task.
+/// Focus the window if it is open, otherwise create it. The page at `/{label}`
+/// is built by the task that owns that window.
 pub fn open_window(app: &AppHandle, label: &'static str, title: &'static str) {
     let app = app.clone();
     // Off the menu callback: building a window from inside it can stall on Windows.
     std::thread::spawn(move || {
         if let Some(window) = app.get_webview_window(label) {
             let _ = window.show();
-            let _ = window.set_focus();
+            // The bar never takes focus: it sits over whatever you are working in.
+            if label != "bar" {
+                let _ = window.set_focus();
+            }
+            return;
+        }
+        if label == "bar" {
+            crate::bar::create(&app, title);
             return;
         }
         let _ = WebviewWindowBuilder::new(&app, label, WebviewUrl::App(format!("/{label}").into()))

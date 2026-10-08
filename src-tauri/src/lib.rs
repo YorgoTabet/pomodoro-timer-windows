@@ -1,3 +1,4 @@
+mod bar;
 mod commands;
 pub mod core;
 mod timer;

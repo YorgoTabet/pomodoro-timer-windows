@@ -220,6 +220,20 @@ impl Shared {
     }
 }
 
+impl Shared {
+    /// Change only the bar's position, under the settings lock, so a drag never
+    /// overwrites a setting saved at the same moment.
+    pub fn set_bar_position(&self, x: f64, y: f64) -> std::io::Result<Settings> {
+        let mut guard = lock(&self.settings);
+        let mut next = guard.clone();
+        next.floating_bar_x = Some(x);
+        next.floating_bar_y = Some(y);
+        next.save(&self.settings_path)?;
+        *guard = next.clone();
+        Ok(next)
+    }
+}
+
 // A panic elsewhere must not wedge the timer, so a poisoned lock is still usable.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())

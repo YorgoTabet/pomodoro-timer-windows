@@ -4,6 +4,8 @@
   "description": "Capability for the windows the tray opens",
   "windows": ["bar", "settings", "stats"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size"
   ]
 }
