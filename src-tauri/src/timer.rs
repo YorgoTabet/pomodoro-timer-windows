@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::{Mutex, MutexGuard},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime},
 };
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -32,9 +32,11 @@ pub struct Elapsed {
 /// Drives the pomodoro cycle. No clock and no Tauri in here: callers pass `now`,
 /// which keeps every rule testable.
 ///
-/// Timing is deadline-based: the core stores an absolute instant and derives the
-/// remaining seconds from it on every tick. That makes it immune to tick drift and
-/// to system sleep. A deadline that passed while asleep fires on the next tick.
+/// Timing is deadline-based: the core stores an absolute wall-clock time and derives
+/// the remaining seconds from it on every tick. That makes it immune to tick drift
+/// and to system sleep. A deadline that passed while asleep fires on the next tick.
+/// Wall clock on purpose: the monotonic `Instant` may stop counting during sleep
+/// (it does on macOS), which would resume the countdown behind.
 #[derive(Debug)]
 pub struct TimerCore {
     phase: Phase,
@@ -45,7 +47,7 @@ pub struct TimerCore {
     /// jump backwards. The new length applies from the next phase.
     total_seconds: i64,
     completed_focus_sessions: u32,
-    deadline: Option<Instant>,
+    deadline: Option<SystemTime>,
 }
 
 impl TimerCore {
@@ -71,7 +73,7 @@ impl TimerCore {
         }
     }
 
-    pub fn toggle(&mut self, now: Instant, settings: &Settings) {
+    pub fn toggle(&mut self, now: SystemTime, settings: &Settings) {
         if self.is_running {
             self.pause(now);
         } else {
@@ -79,7 +81,7 @@ impl TimerCore {
         }
     }
 
-    pub fn start(&mut self, now: Instant, settings: &Settings) {
+    pub fn start(&mut self, now: SystemTime, settings: &Settings) {
         if self.is_running {
             return;
         }
@@ -91,7 +93,7 @@ impl TimerCore {
         self.is_running = true;
     }
 
-    pub fn pause(&mut self, now: Instant) {
+    pub fn pause(&mut self, now: SystemTime) {
         if !self.is_running {
             return;
         }
@@ -126,7 +128,7 @@ impl TimerCore {
 
     /// Call every few hundred milliseconds. Returns the phase change when the
     /// deadline has passed, however long ago.
-    pub fn tick(&mut self, now: Instant, settings: &Settings) -> Option<Elapsed> {
+    pub fn tick(&mut self, now: SystemTime, settings: &Settings) -> Option<Elapsed> {
         let deadline = self.deadline.filter(|_| self.is_running)?;
         if deadline <= now {
             Some(self.elapse(now, settings))
@@ -137,7 +139,7 @@ impl TimerCore {
     }
 
     /// The current phase ran to completion.
-    fn elapse(&mut self, now: Instant, settings: &Settings) -> Elapsed {
+    fn elapse(&mut self, now: SystemTime, settings: &Settings) -> Elapsed {
         let from = self.phase;
         let to = self.next_phase(settings);
         let focus_seconds = (from == Phase::Focus).then(|| {
@@ -172,9 +174,9 @@ impl TimerCore {
         self.remaining_seconds = self.total_seconds;
     }
 
-    fn sync_remaining(&mut self, now: Instant) {
+    fn sync_remaining(&mut self, now: SystemTime) {
         if let Some(deadline) = self.deadline {
-            let millis = deadline.saturating_duration_since(now).as_millis() as i64;
+            let millis = deadline.duration_since(now).map_or(0, |d| d.as_millis() as i64);
             self.remaining_seconds = (millis + 999) / 1000;
         }
     }
@@ -185,11 +187,14 @@ pub struct Shared {
     core: Mutex<TimerCore>,
     settings: Mutex<Settings>,
     pub settings_path: PathBuf,
+    /// Held while a change is made and announced, so a stale state can never be
+    /// published after a newer one.
+    publish_lock: Mutex<()>,
 }
 
 impl Shared {
     pub fn new(settings: Settings, settings_path: PathBuf) -> Self {
-        Shared { core: Mutex::new(TimerCore::new(&settings)), settings: Mutex::new(settings), settings_path }
+        Shared { core: Mutex::new(TimerCore::new(&settings)), settings: Mutex::new(settings), settings_path, publish_lock: Mutex::new(()) }
     }
 
     pub fn settings(&self) -> Settings {
@@ -200,11 +205,13 @@ impl Shared {
         lock(&self.core).state()
     }
 
-    /// Store new settings, clamped, and return what was kept.
-    pub fn replace_settings(&self, settings: Settings) -> Settings {
+    /// Save to disk first, then keep in memory, so the two never disagree.
+    /// Returns the clamped settings that were kept.
+    pub fn replace_settings(&self, settings: Settings) -> std::io::Result<Settings> {
         let clamped = settings.clamped();
+        clamped.save(&self.settings_path)?;
         *lock(&self.settings) = clamped.clone();
-        clamped
+        Ok(clamped)
     }
 }
 
@@ -216,18 +223,34 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Run one change against the timer, then tell everyone if anything moved.
 /// Every path that changes the timer goes through here, so alerts and music can
 /// hook `publish` later without chasing individual commands.
-pub fn apply(app: &AppHandle, change: impl FnOnce(&mut TimerCore, &Settings, Instant) -> Option<Elapsed>) {
+pub fn apply(app: &AppHandle, change: impl FnOnce(&mut TimerCore, &Settings, SystemTime) -> Option<Elapsed>) {
     let shared = app.state::<Shared>();
+    let _order = lock(&shared.publish_lock);
     let settings = shared.settings();
     let (before, after, elapsed) = {
         let mut core = lock(&shared.core);
         let before = core.state();
-        let elapsed = change(&mut core, &settings, Instant::now());
+        let elapsed = change(&mut core, &settings, SystemTime::now());
         (before, core.state(), elapsed)
     };
     if before != after || elapsed.is_some() {
         publish(app, &after, elapsed);
     }
+}
+
+/// Save new settings, then tell the timer, the windows and the tray.
+/// The one path for every settings change, so the tray toggle and the settings
+/// window behave the same.
+pub fn commit_settings(app: &AppHandle, settings: Settings) -> Result<Settings, String> {
+    let shared = app.state::<Shared>();
+    let saved = shared.replace_settings(settings).map_err(|e| e.to_string())?;
+    let _ = app.emit("settings-changed", &saved);
+    apply(app, |c, s, _| {
+        c.settings_changed(s);
+        None
+    });
+    crate::tray::sync_bar(app, &saved);
+    Ok(saved)
 }
 
 /// The single place a change becomes visible: windows, tray, and phase hooks.
@@ -280,7 +303,7 @@ mod tests {
     #[test]
     fn pause_and_resume_keep_the_remaining_time() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         assert_eq!(core.tick(t0 + secs(20), &s), None);
@@ -298,7 +321,7 @@ mod tests {
     #[test]
     fn remaining_rounds_up_so_it_never_shows_zero_early() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         core.tick(t0 + Duration::from_millis(59_500), &s);
@@ -308,7 +331,7 @@ mod tests {
     #[test]
     fn elapse_moves_to_a_stopped_break_without_auto_start() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         let e = core.tick(t0 + secs(60), &s).expect("deadline reached");
@@ -320,7 +343,7 @@ mod tests {
     #[test]
     fn elapse_auto_starts_the_break_when_asked() {
         let s = Settings { auto_start_breaks: true, ..short() };
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         core.tick(t0 + secs(60), &s);
@@ -335,7 +358,7 @@ mod tests {
     #[test]
     fn break_leads_back_to_focus_and_follows_the_focus_flag() {
         let mut s = Settings { auto_start_focus: true, ..short() };
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         core.tick(t0 + secs(60), &s);
@@ -355,7 +378,7 @@ mod tests {
     #[test]
     fn every_nth_focus_gets_a_long_break() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         core.tick(t0 + secs(60), &s);
@@ -369,7 +392,7 @@ mod tests {
     #[test]
     fn skip_moves_on_without_counting_a_session() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         let e = core.skip(&s);
@@ -382,7 +405,7 @@ mod tests {
     #[test]
     fn reset_returns_to_a_fresh_stopped_focus() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         core.tick(t0 + secs(60), &s);
@@ -394,7 +417,7 @@ mod tests {
     #[test]
     fn a_long_gap_such_as_sleep_elapses_on_the_next_tick() {
         let s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         // The lid was shut for eight hours.
@@ -405,9 +428,32 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_clock_jump_forward_counts_as_elapsed_time() {
+        let s = short();
+        let t0 = SystemTime::now();
+        let mut core = TimerCore::new(&s);
+        core.start(t0, &s);
+        // The clock leaps 45 s, as when the PC wakes from sleep.
+        core.tick(t0 + secs(45), &s);
+        assert_eq!(core.state().remaining_seconds, 15);
+    }
+
+    #[test]
+    fn a_clock_set_back_never_panics_or_goes_negative() {
+        let s = short();
+        let t0 = SystemTime::now() + secs(100);
+        let mut core = TimerCore::new(&s);
+        core.start(t0, &s);
+        core.tick(t0 - secs(30), &s);
+        assert_eq!(core.state().remaining_seconds, 90);
+        core.pause(t0 + secs(500));
+        assert_eq!(core.state().remaining_seconds, 0);
+    }
+
+    #[test]
     fn a_running_phase_keeps_its_length_when_settings_change() {
         let mut s = short();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         s.focus_minutes = 45;
@@ -423,7 +469,7 @@ mod tests {
         let s = short();
         let mut core = TimerCore::new(&s);
         core.remaining_seconds = 0;
-        core.start(Instant::now(), &s);
+        core.start(SystemTime::now(), &s);
         assert_eq!(core.state().remaining_seconds, 60);
     }
 

@@ -28,10 +28,12 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let path = app.path().app_config_dir()?.join("settings.json");
-            let shared = timer::Shared::new(Settings::load(&path), path);
+            let settings = Settings::load(&path);
+            let shared = timer::Shared::new(settings.clone(), path);
             let state = shared.state();
             app.manage(shared);
-            tray::build(app.handle(), &state)?;
+            tray::build(app.handle(), &state, settings.show_floating_bar)?;
+            tray::sync_bar(app.handle(), &settings);
             timer::spawn_ticker(app.handle().clone());
             Ok(())
         })

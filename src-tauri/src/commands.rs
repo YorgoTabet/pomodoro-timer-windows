@@ -2,7 +2,7 @@ use crate::{
     core::settings::Settings,
     timer::{self, Shared, TimerState},
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub fn get_state(shared: State<Shared>) -> TimerState {
@@ -52,13 +52,6 @@ pub fn get_settings(shared: State<Shared>) -> Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) -> Result<Settings, String> {
-    let saved = shared.replace_settings(settings);
-    saved.save(&shared.settings_path).map_err(|e| e.to_string())?;
-    let _ = app.emit("settings-changed", &saved);
-    timer::apply(&app, |c, s, _| {
-        c.settings_changed(s);
-        None
-    });
-    Ok(saved)
+pub fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
+    timer::commit_settings(&app, settings)
 }

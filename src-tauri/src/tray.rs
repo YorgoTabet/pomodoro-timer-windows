@@ -1,6 +1,7 @@
 use crate::{
     core::phase::Phase,
-    timer::{self, TimerState},
+    core::settings::Settings,
+    timer::{self, Shared, TimerState},
 };
 use std::sync::OnceLock;
 use tauri::{
@@ -15,6 +16,7 @@ const TRAY_ID: &str = "main";
 struct Items {
     header: MenuItem<tauri::Wry>,
     toggle: MenuItem<tauri::Wry>,
+    bar: MenuItem<tauri::Wry>,
 }
 
 static ITEMS: OnceLock<Items> = OnceLock::new();
@@ -40,12 +42,12 @@ pub fn tooltip_text(phase: Phase, remaining_seconds: i64) -> String {
     format!("{} — {} remaining", phase.title(), display_time(remaining_seconds))
 }
 
-pub fn build(app: &AppHandle, state: &TimerState) -> tauri::Result<()> {
+pub fn build(app: &AppHandle, state: &TimerState, show_bar: bool) -> tauri::Result<()> {
     let header = MenuItem::with_id(app, "header", header_text(state.phase, state.is_running, state.remaining_seconds), false, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", toggle_label(state.is_running), true, None::<&str>)?;
     let skip = MenuItem::with_id(app, "skip", "Skip", true, None::<&str>)?;
     let reset = MenuItem::with_id(app, "reset", "Reset", true, None::<&str>)?;
-    let bar = MenuItem::with_id(app, "bar", "Show floating bar", true, None::<&str>)?;
+    let bar = MenuItem::with_id(app, "bar", bar_label(show_bar), true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let stats = MenuItem::with_id(app, "stats", "Stats…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Pomodoro", true, None::<&str>)?;
@@ -59,28 +61,38 @@ pub fn build(app: &AppHandle, state: &TimerState) -> tauri::Result<()> {
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip(tooltip_text(state.phase, state.remaining_seconds))
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "toggle" => timer::apply(app, |c, s, now| {
-                c.toggle(now, s);
-                None
-            }),
-            "skip" => timer::apply(app, |c, s, _| Some(c.skip(s))),
-            "reset" => timer::apply(app, |c, s, _| {
-                c.reset(s);
-                None
-            }),
-            "bar" => open_window(app, "bar", "Pomodoro"),
-            "settings" => open_window(app, "settings", "Settings"),
-            "stats" => open_window(app, "stats", "Stats"),
-            "quit" => app.exit(0),
-            _ => {}
+        .on_menu_event(|app, event| {
+            let app = app.clone();
+            let id = event.id().as_ref().to_string();
+            // Off the main thread: the handlers wait on the publish lock, and the
+            // thread holding it may be waiting on the main thread to update the menu.
+            std::thread::spawn(move || match id.as_str() {
+                "toggle" => timer::apply(&app, |c, s, now| {
+                    c.toggle(now, s);
+                    None
+                }),
+                "skip" => timer::apply(&app, |c, s, _| Some(c.skip(s))),
+                "reset" => timer::apply(&app, |c, s, _| {
+                    c.reset(s);
+                    None
+                }),
+                "bar" => {
+                    let mut settings = app.state::<Shared>().settings();
+                    settings.show_floating_bar = !settings.show_floating_bar;
+                    let _ = timer::commit_settings(&app, settings);
+                }
+                "settings" => open_window(&app, "settings", "Settings"),
+                "stats" => open_window(&app, "stats", "Stats"),
+                "quit" => app.exit(0),
+                _ => {}
+            });
         });
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
 
-    let _ = ITEMS.set(Items { header, toggle });
+    let _ = ITEMS.set(Items { header, toggle, bar });
     Ok(())
 }
 
@@ -92,6 +104,26 @@ pub fn refresh(app: &AppHandle, state: &TimerState) {
     if let Some(items) = ITEMS.get() {
         let _ = items.header.set_text(header_text(state.phase, state.is_running, state.remaining_seconds));
         let _ = items.toggle.set_text(toggle_label(state.is_running));
+    }
+}
+
+fn bar_label(show: bool) -> &'static str {
+    if show {
+        "Hide floating bar"
+    } else {
+        "Show floating bar"
+    }
+}
+
+/// Make the bar window and the menu label match `showFloatingBar`.
+pub fn sync_bar(app: &AppHandle, settings: &Settings) {
+    if let Some(items) = ITEMS.get() {
+        let _ = items.bar.set_text(bar_label(settings.show_floating_bar));
+    }
+    if settings.show_floating_bar {
+        open_window(app, "bar", "Pomodoro");
+    } else if let Some(window) = app.get_webview_window("bar") {
+        let _ = window.close();
     }
 }
 
@@ -136,6 +168,12 @@ mod tests {
     fn header_says_paused_only_when_stopped() {
         assert_eq!(header_text(Phase::Focus, true, 1453), "Focus · 24:13");
         assert_eq!(header_text(Phase::ShortBreak, false, 300), "Short Break · 05:00 · paused");
+    }
+
+    #[test]
+    fn bar_label_follows_the_setting() {
+        assert_eq!(bar_label(true), "Hide floating bar");
+        assert_eq!(bar_label(false), "Show floating bar");
     }
 
     #[test]
