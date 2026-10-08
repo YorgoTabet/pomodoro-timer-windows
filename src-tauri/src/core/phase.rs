@@ -13,6 +13,14 @@ impl Phase {
     pub fn is_break(self) -> bool {
         self != Phase::Focus
     }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Phase::Focus => "Focus",
+            Phase::ShortBreak => "Short Break",
+            Phase::LongBreak => "Long Break",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -24,6 +32,13 @@ mod tests {
         assert_eq!(serde_json::to_string(&Phase::Focus).unwrap(), "\"focus\"");
         assert_eq!(serde_json::to_string(&Phase::ShortBreak).unwrap(), "\"shortBreak\"");
         assert_eq!(serde_json::to_string(&Phase::LongBreak).unwrap(), "\"longBreak\"");
+    }
+
+    #[test]
+    fn titles_match_the_mac_app() {
+        assert_eq!(Phase::Focus.title(), "Focus");
+        assert_eq!(Phase::ShortBreak.title(), "Short Break");
+        assert_eq!(Phase::LongBreak.title(), "Long Break");
     }
 
     #[test]
