@@ -3,7 +3,7 @@ use crate::{
     core::settings::Settings,
     timer::{self, Shared, TimerState},
 };
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -96,15 +96,28 @@ pub fn build(app: &AppHandle, state: &TimerState, show_bar: bool) -> tauri::Resu
     Ok(())
 }
 
+/// The newest state the tray should show. Written under the publish lock, read on
+/// the main thread, so whichever update runs last always draws the latest state.
+static LATEST: Mutex<Option<TimerState>> = Mutex::new(None);
+
 /// Called on every published change, so the tooltip and header follow the clock.
+/// Never blocks: the tray is touched on the main thread, later, and the caller may
+/// be holding the publish lock.
 pub fn refresh(app: &AppHandle, state: &TimerState) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_tooltip(Some(tooltip_text(state.phase, state.remaining_seconds)));
-    }
-    if let Some(items) = ITEMS.get() {
-        let _ = items.header.set_text(header_text(state.phase, state.is_running, state.remaining_seconds));
-        let _ = items.toggle.set_text(toggle_label(state.is_running));
-    }
+    *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(state.clone());
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(state) = LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        if let Some(tray) = handle.tray_by_id(TRAY_ID) {
+            let _ = tray.set_tooltip(Some(tooltip_text(state.phase, state.remaining_seconds)));
+        }
+        if let Some(items) = ITEMS.get() {
+            let _ = items.header.set_text(header_text(state.phase, state.is_running, state.remaining_seconds));
+            let _ = items.toggle.set_text(toggle_label(state.is_running));
+        }
+    });
 }
 
 fn bar_label(show: bool) -> &'static str {
@@ -123,7 +136,8 @@ pub fn sync_bar(app: &AppHandle, settings: &Settings) {
     if settings.show_floating_bar {
         open_window(app, "bar", "Pomodoro");
     } else if let Some(window) = app.get_webview_window("bar") {
-        let _ = window.close();
+        // Hidden, not closed: closing is asynchronous and races with a quick re-show.
+        let _ = window.hide();
     }
 }
 

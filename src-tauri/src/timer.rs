@@ -177,7 +177,8 @@ impl TimerCore {
     fn sync_remaining(&mut self, now: SystemTime) {
         if let Some(deadline) = self.deadline {
             let millis = deadline.duration_since(now).map_or(0, |d| d.as_millis() as i64);
-            self.remaining_seconds = (millis + 999) / 1000;
+            // Capped at the total: a clock set back must not push the ring past full.
+            self.remaining_seconds = ((millis + 999) / 1000).min(self.total_seconds);
         }
     }
 }
@@ -189,6 +190,10 @@ pub struct Shared {
     pub settings_path: PathBuf,
     /// Held while a change is made and announced, so a stale state can never be
     /// published after a newer one.
+    ///
+    /// RULE: never call tray or window APIs while holding it. Those wait on the main
+    /// thread, and sync commands run on the main thread and wait on this lock. The
+    /// tray is updated through `tray::refresh`, which never blocks.
     publish_lock: Mutex<()>,
 }
 
@@ -445,7 +450,7 @@ mod tests {
         let mut core = TimerCore::new(&s);
         core.start(t0, &s);
         core.tick(t0 - secs(30), &s);
-        assert_eq!(core.state().remaining_seconds, 90);
+        assert_eq!(core.state().remaining_seconds, 60);
         core.pause(t0 + secs(500));
         assert_eq!(core.state().remaining_seconds, 0);
     }
