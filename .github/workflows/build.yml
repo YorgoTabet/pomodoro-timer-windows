@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build installer
+        run: npm run tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pomodoro-windows-installer
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+
+      # After the installer: test binaries lack the app manifest and may not launch on
+      # the runner, and the installer must still be produced.
+      - name: Rust tests
+        run: cargo test
+        working-directory: src-tauri

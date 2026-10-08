@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "pomodoro-timer-windows",
+  "productName": "Pomodoro",
   "version": "0.1.0",
   "identifier": "com.yorgotabet.pomodoro",
   "build": {
@@ -10,13 +10,7 @@
     "frontendDist": "../build"
   },
   "app": {
-    "windows": [
-      {
-        "title": "pomodoro-timer-windows",
-        "width": 800,
-        "height": 600
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
