@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{fs, io, path::Path};
 
 /// Who pops out from behind the pill on a phase change. `None` means the whole
@@ -91,11 +92,28 @@ impl Settings {
         self
     }
 
-    /// Never fails: a missing or broken file gives the defaults.
+    /// Never fails: a missing or unparseable file gives the defaults, and a bad
+    /// value for one key only resets that key, like the Mac app's per-key reads.
     pub fn load(path: &Path) -> Settings {
-        fs::read_to_string(path)
+        let Some(Value::Object(file)) = fs::read_to_string(path)
             .ok()
-            .and_then(|text| serde_json::from_str::<Settings>(&text).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            return Settings::default();
+        };
+        let Ok(Value::Object(mut merged)) = serde_json::to_value(Settings::default()) else {
+            return Settings::default();
+        };
+        for (key, value) in file {
+            let value = whole_number(value);
+            // Try the key on its own; keep it only if the whole struct still reads.
+            let mut candidate = merged.clone();
+            candidate.insert(key.clone(), value.clone());
+            if serde_json::from_value::<Settings>(Value::Object(candidate)).is_ok() {
+                merged.insert(key, value);
+            }
+        }
+        serde_json::from_value::<Settings>(Value::Object(merged))
             .unwrap_or_default()
             .clamped()
     }
@@ -106,6 +124,14 @@ impl Settings {
         }
         let json = serde_json::to_string_pretty(&self.clone().clamped()).map_err(io::Error::other)?;
         fs::write(path, json)
+    }
+}
+
+/// 50.0 reads as 50, so integer fields accept whole-valued floats.
+fn whole_number(value: Value) -> Value {
+    match value.as_f64() {
+        Some(f) if value.is_f64() && f.fract() == 0.0 && f.abs() < 9e15 => Value::from(f as i64),
+        _ => value,
     }
 }
 
@@ -171,8 +197,28 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{ not json").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
-        fs::write(&path, "{\"focusMinutes\": \"lots\"}").unwrap();
+        fs::write(&path, "[1, 2]").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
+    }
+
+    #[test]
+    fn one_bad_key_only_resets_that_key() {
+        let path = temp_path("badkey");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["\"lots\"", "25.5", "null"] {
+            fs::write(&path, format!("{{\"focusMinutes\": {bad}, \"shortBreakMinutes\": 10}}")).unwrap();
+            let s = Settings::load(&path);
+            assert_eq!(s.focus_minutes, 25);
+            assert_eq!(s.short_break_minutes, 10);
+        }
+    }
+
+    #[test]
+    fn whole_valued_floats_count_as_integers() {
+        let path = temp_path("float");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"focusMinutes\": 50.0}").unwrap();
+        assert_eq!(Settings::load(&path).focus_minutes, 50);
     }
 
     #[test]
